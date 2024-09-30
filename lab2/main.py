@@ -1,95 +1,141 @@
 import numpy as np
 import math
-from scipy.optimize import linprog  # Импортируем функцию linprog
 
-# Симплекс-метод для решения линейной задачи
-def simplex_method(A, b, c):
+
+def first_phase(c: np.ndarray, A: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray, list]:
     m, n = A.shape
-    B = list(range(n - m, n))  # базисные индексы
-    N = list(range(n - m))  # небазисные индексы
+    n_set = set(range(1, n + 1))
 
-    # Начальное базисное решение
-    A_b_inv = np.linalg.inv(A[:, B])
-    x_b = np.dot(A_b_inv, b)
-    x = np.zeros(n)
-    x[B] = x_b
+    mask = (b < 0)
+    b[mask] *= -1
+    A[mask] *= -1
 
-    # Итерации симплекс-метода
-    while True:
-        c_b = c[B]
-        c_n = c[N]
+    c_aux = np.concatenate((np.zeros(n), np.full(m, -1)))
+    A_aux = np.concatenate((A, np.eye(m)), axis=1)
+    x_aux = np.concatenate((np.zeros(n), b))
+    B_aux = [i + n for i in range(1, m + 1)]
 
-        # Найдем вектор теневых цен (потенциалов)
-        y = np.dot(c_b, A_b_inv)
+    x_aux, B_aux = second_phase(A_aux, c_aux, x_aux, B_aux)
 
-        # Вычислим оценку редуцированных затрат
-        delta = c_n - np.dot(y, A[:, N])
+    if np.any(x_aux[-m:] != 0):
+        raise Exception('This problem is infeasible!')
 
-        # Условие оптимальности (если все редуцированные затраты >= 0)
-        if all(d >= 0 for d in delta):
-            return x, B
-
-        # Найдем входящую переменную
-        q = N[np.argmin(delta)]
-
-        # Найдем направление изменения решения
-        d_b = np.dot(A_b_inv, A[:, q])
-        if all(d <= 0 for d in d_b):
-            return None, "Целевая функция не ограничена"
-
-        # Найдем выходящую переменную
-        theta = min(x[B] / d_b[d_b > 0])
-        p = B[np.argmin(x[B] / d_b[d_b > 0])]
-
-        # Обновляем базис
-        x[B] -= theta * d_b
-        x[q] = theta
-        B[B.index(p)] = q
-        N[N.index(q)] = p
-
-        # Обновляем обратную матрицу базиса
-        A_b_inv = np.linalg.inv(A[:, B])
-
-# Метод отсекающего ограничения Гомори
-def gomory_cutting_plane_method(A, b, c):
-    m, n = A.shape
+    x = x_aux[:n]
+    B = B_aux
 
     while True:
-        # Решаем текущую задачу линейного программирования
-        res = linprog(c, A_eq=A, b_eq=b, method='simplex')
+        if set(B).issubset(n_set):
+            return x, A, B
 
-        if res.status != 0:
-            return "Задача несовместна или целевая функция неограничена сверху"
+        j_k = max(B)
+        k = B.index(j_k)
 
-        x = res.x
+        j_list = list(n_set - set(B))
+        A_B = A_aux[:, np.array(B) - 1]
+        A_B_inverted = np.linalg.inv(A_B)
 
-        # Проверяем, является ли текущее решение целым
-        if all(math.isclose(xi, round(xi)) for xi in x[:n]) and not np.allclose(x[:n], 0):
-            return f"Оптимальный план: {x[:n]}"
+        l = [(j, A_B_inverted.dot(A_aux[:, j - 1])) for j in j_list]
 
-        # Поиск дробной компоненты решения
-        try:
-            fractional_index = next(i for i in range(n) if not math.isclose(x[i], round(x[i])))
-        except StopIteration:
-            return f"Все переменные уже целые, но решение не найдено"
+        was = False
+        for j, l_j in l:
+            if l_j[k] != 0:
+                B[k] = j
+                was = True
+                break
 
-        # Добавляем отсекающее ограничение Гомори
-        gomory_cut = x[fractional_index] - math.floor(x[fractional_index])
-        new_constraint = np.floor(A[fractional_index]) - A[fractional_index]
-        b = np.append(b, -gomory_cut)
-        A = np.vstack([A, new_constraint])
+        if not was:
+            i = j_k - n - 1
 
-        print(f"Добавлено отсекающее ограничение: {new_constraint} <= {gomory_cut}")
+            A_aux = np.delete(A_aux, i, axis=0)
+            A = np.delete(A, i, axis=0)
+
+            b = np.delete(b, i)
+            B.remove(j_k)
 
 
+def second_phase(A: np.ndarray, c_T: np.ndarray, x_T: np.ndarray, B: list) -> tuple[np.ndarray, np.ndarray]:
+    while True:
+        A_B = A[:, np.array(B) - 1]
+        A_B_inverted = np.linalg.inv(A_B)
 
-# Пример использования
-A = np.array([
-    [3, 2, 1, 0],
-    [-3, 2, 0, 1]
-])  # Матрица A
-b = np.array([6, 0])  # Вектор b
-c = np.array([0, 1, 0, 0])  # Вектор c
+        c_B_T = c_T[np.array(B) - 1]
+        u_T = c_B_T.dot(A_B_inverted)
+        delta_T = u_T.dot(A) - c_T
 
-solution = gomory_cutting_plane_method(A, b, c)
-print(solution)
+        if np.all(delta_T >= 0):
+            return x_T, B
+
+        j0 = np.where(delta_T < 0)[0][0]
+        delta = delta_T[j0]
+
+        z = A_B_inverted.dot(A[:, j0])
+        theta = np.array([x_T[j - 1] / z[i] if z[i] > 0 else np.inf for i, j in enumerate(B)])
+        theta0 = np.min(theta)
+
+        if theta0 == np.inf:
+            raise Exception('The target functionality of the task is not limited from ' \
+                            'above on a set of acceptable plans!')
+
+        k = theta.tolist().index(theta0)
+        j_k = B[k]
+        B[k] = j0 + 1
+
+        x_T[j0] = theta0
+        for i, j in enumerate(B):
+            if j != j0 + 1:
+                x_T[j - 1] = x_T[j - 1] - theta0 * z[i]
+        x_T[j_k - 1] = 0
+
+
+def get_fractional_part(number: float) -> float:
+    return number - int(number) if number >= 0 else number - math.floor(number)
+
+
+def homori_method(c: np.ndarray, A: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, float]:
+    m, n = A.shape
+
+    x, _, B = first_phase(c, A, b)
+
+    n_set = set(range(1, n + 1))
+    N = list(n_set - set(B))
+
+    integer_mask = x == x.astype(np.int32)
+    if all(integer_mask):
+        return x
+    else:
+        float_basis_indices = [i for i in np.array(B) - 1 if not integer_mask[i]]
+        float_index = float_basis_indices[-1]
+        float_element = x[float_index]
+
+        k = B.index(float_index + 1)
+
+        A_B = A[:, np.array(B) - 1]
+        A_N = A[:, np.array(N) - 1]
+
+        A_B_inverted = np.linalg.inv(A_B)
+        Q = A_B_inverted @ A_N
+
+        l = Q[k]
+
+        l_i = 0
+        result = []
+        for i in range(1, n + 1):
+            if i in B:
+                result.append(0)
+            elif i in N:
+                result.append(get_fractional_part(l[l_i]))
+                l_i += 1
+        result.append(-1)
+
+        return np.array(result), get_fractional_part(float_element)
+
+
+if __name__ == '__main__':
+    c = np.array([0, 1, 0, 0])
+    A = np.array([[3, 2, 1, 0],
+                  [-3, 2, 0, 1]])
+    b = np.array([6, 0])
+
+    result = homori_method(c, A, b)
+
+    print(result)
